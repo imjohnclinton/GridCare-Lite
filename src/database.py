@@ -124,41 +124,431 @@ def init_db(db_path: str = "gridcare.db") -> sqlite3.Connection:
 # ---------------------------------------------------------------------------
 
 _SEED_USERS = [
-    ("admin",     "admin123", "admin",            "Admin User"),
-    ("engineer1", "pass123",  "engineer",         "Kwame Asante"),
-    ("tech1",     "pass123",  "technician",       "Ama Serwaa"),
-    ("cs1",       "pass123",  "customer_service", "Esi Mensah"),
+    ("admin", "admin123", "admin", "Admin User"),
+    ("engineer1", "pass123", "engineer", "Kwame Asante"),
+    ("engineer2", "pass123", "engineer", "Akosua Owusu"),
+    ("tech1", "pass123", "technician", "Ama Serwaa"),
+    ("tech2", "pass123", "technician", "Kojo Mensah"),
+    ("tech3", "pass123", "technician", "Yaw Boateng"),
+    ("cs1", "pass123", "customer_service", "Esi Mensah"),
+    ("cs2", "pass123", "customer_service", "Adwoa Nyarko"),
 ]
 
+
 _SEED_SUBSTATIONS = [
-    (1, "Accra Central",   "Greater Accra"),
-    (2, "Kumasi Central",  "Ashanti"),
-    (3, "Takoradi",        "Western"),
-    (4, "Tamale",          "Northern"),
-    (5, "Cape Coast",      "Central"),
-    (6, "Ho",              "Volta"),
-    (7, "Sunyani",         "Bono"),
-    (8, "Bolgatanga",      "Upper East"),
-    (9, "Wa",              "Upper West"),
-    (10,"Koforidua",       "Eastern"),
+    (101, "Achimota Substation", "Greater Accra"),
+    (102, "Accra Central Substation", "Greater Accra"),
+    (103, "Tema Main Substation", "Greater Accra"),
+    (104, "Kumasi Central Substation", "Ashanti"),
+    (105, "Takoradi Main Substation", "Western"),
+    (106, "Cape Coast Substation", "Central"),
+    (107, "Tamale Main Substation", "Northern"),
+    (108, "Ho Central Substation", "Volta"),
+    (109, "Koforidua Substation", "Eastern"),
+    (110, "Sunyani Main Substation", "Bono"),
+]
+
+
+_SEED_LINES = [
+    ("Achimota Feeder A", "33kV", "Greater Accra", 101),
+    ("Achimota Feeder B", "11kV", "Greater Accra", 101),
+    ("Accra Central Feeder", "11kV", "Greater Accra", 102),
+    ("Tema Industrial Line", "33kV", "Greater Accra", 103),
+    ("Kumasi North Feeder", "33kV", "Ashanti", 104),
+    ("Kumasi South Feeder", "11kV", "Ashanti", 104),
+    ("Takoradi Feeder A", "11kV", "Western", 105),
+    ("Cape Coast Feeder", "11kV", "Central", 106),
+    ("Tamale Northern Line", "33kV", "Northern", 107),
+    ("Ho Distribution Feeder", "11kV", "Volta", 108),
+    ("Koforidua Feeder", "11kV", "Eastern", 109),
+    ("Sunyani Feeder A", "33kV", "Bono", 110),
 ]
 
 
 def seed_data(conn: sqlite3.Connection):
-    """Insert default users and substations only when the tables are empty."""
+    """
+    Populate a new GridCare-Lite database with demonstration data.
+
+    Existing databases are not duplicated because each section is only
+    populated when its corresponding table is empty.
+    """
     cur = conn.cursor()
 
+    # ---------------------------------------------------------------
+    # Users
+    # ---------------------------------------------------------------
+
     if cur.execute("SELECT COUNT(*) FROM users").fetchone()[0] == 0:
-        for uname, pw, role, name in _SEED_USERS:
+        for username, password, role, full_name in _SEED_USERS:
             cur.execute(
-                "INSERT INTO users (username, password_hash, role, full_name) VALUES (?,?,?,?)",
-                (uname, hash_password(pw), role, name),
+                """
+                INSERT INTO users
+                    (username, password_hash, role, full_name)
+                VALUES (?, ?, ?, ?)
+                """,
+                (
+                    username,
+                    hash_password(password),
+                    role,
+                    full_name
+                ),
             )
 
-    if cur.execute("SELECT COUNT(*) FROM substations").fetchone()[0] == 0:
+    # ---------------------------------------------------------------
+    # Substations
+    # ---------------------------------------------------------------
+
+    if cur.execute(
+        "SELECT COUNT(*) FROM substations"
+    ).fetchone()[0] == 0:
+
         cur.executemany(
-            "INSERT OR IGNORE INTO substations (substation_id, name, region) VALUES (?,?,?)",
+            """
+            INSERT INTO substations
+                (substation_id, name, region)
+            VALUES (?, ?, ?)
+            """,
             _SEED_SUBSTATIONS,
+        )
+
+    # ---------------------------------------------------------------
+    # Lines
+    # ---------------------------------------------------------------
+
+    if cur.execute(
+        "SELECT COUNT(*) FROM lines"
+    ).fetchone()[0] == 0:
+
+        cur.executemany(
+            """
+            INSERT INTO lines
+                (name, voltage, region, substation_id)
+            VALUES (?, ?, ?, ?)
+            """,
+            _SEED_LINES,
+        )
+
+    # ---------------------------------------------------------------
+    # Look up seeded users
+    # ---------------------------------------------------------------
+
+    engineer1 = cur.execute(
+        "SELECT user_id FROM users WHERE username='engineer1'"
+    ).fetchone()[0]
+
+    engineer2 = cur.execute(
+        "SELECT user_id FROM users WHERE username='engineer2'"
+    ).fetchone()[0]
+
+    tech1 = cur.execute(
+        "SELECT user_id FROM users WHERE username='tech1'"
+    ).fetchone()[0]
+
+    tech2 = cur.execute(
+        "SELECT user_id FROM users WHERE username='tech2'"
+    ).fetchone()[0]
+
+    tech3 = cur.execute(
+        "SELECT user_id FROM users WHERE username='tech3'"
+    ).fetchone()[0]
+
+    cs1 = cur.execute(
+        "SELECT user_id FROM users WHERE username='cs1'"
+    ).fetchone()[0]
+
+    cs2 = cur.execute(
+        "SELECT user_id FROM users WHERE username='cs2'"
+    ).fetchone()[0]
+
+    # ---------------------------------------------------------------
+    # Outages
+    # ---------------------------------------------------------------
+
+    if cur.execute(
+        "SELECT COUNT(*) FROM outages"
+    ).fetchone()[0] == 0:
+
+        sample_outages = [
+            (
+                101,
+                engineer1,
+                "Transformer overheating reported at Achimota Substation.",
+                "High",
+                "Open",
+                "2026-08-26 08:15:00",
+                None,
+            ),
+
+            (
+                102,
+                engineer1,
+                "Protection relay trip causing partial supply interruption.",
+                "Critical",
+                "In Progress",
+                "2026-08-25 14:30:00",
+                None,
+            ),
+
+            (
+                103,
+                engineer2,
+                "Industrial feeder interruption affecting customers in Tema.",
+                "High",
+                "In Progress",
+                "2026-08-25 10:20:00",
+                None,
+            ),
+
+            (
+                104,
+                engineer2,
+                "Damaged distribution cable detected during inspection.",
+                "Medium",
+                "Open",
+                "2026-08-24 16:45:00",
+                None,
+            ),
+
+            (
+                105,
+                engineer1,
+                "Breaker failure caused temporary feeder outage.",
+                "Critical",
+                "Resolved",
+                "2026-08-20 07:30:00",
+                "2026-08-20 12:45:00",
+            ),
+
+            (
+                106,
+                engineer2,
+                "Voltage instability reported on Cape Coast feeder.",
+                "Medium",
+                "Resolved",
+                "2026-08-19 11:00:00",
+                "2026-08-19 15:30:00",
+            ),
+
+            (
+                107,
+                engineer1,
+                "Lightning-related fault detected on northern transmission line.",
+                "High",
+                "Resolved",
+                "2026-08-18 20:10:00",
+                "2026-08-19 03:20:00",
+            ),
+
+            (
+                108,
+                engineer2,
+                "Scheduled inspection identified deteriorating switchgear.",
+                "Low",
+                "Open",
+                "2026-08-27 09:00:00",
+                None,
+            ),
+
+            (
+                109,
+                engineer1,
+                "Feeder protection system repeatedly tripping.",
+                "Medium",
+                "Open",
+                "2026-08-27 13:20:00",
+                None,
+            ),
+
+            (
+                110,
+                engineer2,
+                "Transformer cooling fan failure detected.",
+                "High",
+                "Resolved",
+                "2026-08-21 06:40:00",
+                "2026-08-21 10:15:00",
+            ),
+        ]
+
+        cur.executemany(
+            """
+            INSERT INTO outages
+            (
+                substation_id,
+                reported_by,
+                description,
+                severity,
+                status,
+                reported_at,
+                resolved_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            sample_outages,
+        )
+
+    # ---------------------------------------------------------------
+    # Work Orders
+    # ---------------------------------------------------------------
+
+    if cur.execute(
+        "SELECT COUNT(*) FROM work_orders"
+    ).fetchone()[0] == 0:
+
+        # Get outage IDs using their descriptions/substations.
+        outages = {
+            row[1]: row[0]
+            for row in cur.execute(
+                """
+                SELECT outage_id, substation_id
+                FROM outages
+                """
+            ).fetchall()
+        }
+
+        sample_work_orders = [
+            (
+                outages[102],
+                tech1,
+                "2026-08-28",
+                "Scheduled",
+            ),
+
+            (
+                outages[103],
+                tech2,
+                "2026-08-28",
+                "Scheduled",
+            ),
+
+            (
+                outages[105],
+                tech1,
+                "2026-08-20",
+                "Completed",
+            ),
+
+            (
+                outages[106],
+                tech2,
+                "2026-08-19",
+                "Completed",
+            ),
+
+            (
+                outages[107],
+                tech3,
+                "2026-08-18",
+                "Completed",
+            ),
+
+            (
+                outages[110],
+                tech3,
+                "2026-08-21",
+                "Completed",
+            ),
+        ]
+
+        cur.executemany(
+            """
+            INSERT INTO work_orders
+                (
+                    outage_id,
+                    assigned_technician,
+                    scheduled_date,
+                    status
+                )
+            VALUES (?, ?, ?, ?)
+            """,
+            sample_work_orders,
+        )
+
+    # ---------------------------------------------------------------
+    # Complaints
+    # ---------------------------------------------------------------
+
+    if cur.execute(
+        "SELECT COUNT(*) FROM complaints"
+    ).fetchone()[0] == 0:
+
+        outages = {
+            row[1]: row[0]
+            for row in cur.execute(
+                """
+                SELECT outage_id, substation_id
+                FROM outages
+                """
+            ).fetchall()
+        }
+
+        sample_complaints = [
+            (
+                cs1,
+                outages[102],
+                "Daniel Mensah",
+                "0240001001",
+                "Customer reports no electricity since afternoon.",
+                "2026-08-25 15:10:00",
+                "Open",
+            ),
+
+            (
+                cs2,
+                outages[103],
+                "Akua Boateng",
+                "0200001002",
+                "Factory has experienced complete power interruption.",
+                "2026-08-25 11:05:00",
+                "Open",
+            ),
+
+            (
+                cs1,
+                outages[105],
+                "Joseph Arthur",
+                "0540001003",
+                "Customer reported prolonged outage in residential area.",
+                "2026-08-20 08:45:00",
+                "Resolved",
+            ),
+
+            (
+                cs2,
+                outages[107],
+                "Fatima Ibrahim",
+                "0550001004",
+                "Customer reported loss of supply after thunderstorm.",
+                "2026-08-18 21:00:00",
+                "Resolved",
+            ),
+
+            (
+                cs1,
+                None,
+                "Grace Osei",
+                "0270001005",
+                "Customer reports intermittent low voltage. No known outage.",
+                "2026-08-27 17:25:00",
+                "Open",
+            ),
+        ]
+
+        cur.executemany(
+            """
+            INSERT INTO complaints
+            (
+                logged_by,
+                outage_id,
+                customer_name,
+                contact,
+                description,
+                logged_at,
+                status
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            sample_complaints,
         )
 
     conn.commit()
