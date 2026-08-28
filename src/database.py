@@ -7,6 +7,7 @@ import sqlite3
 import hashlib
 import os
 import csv
+import re
 from datetime import datetime
 
 
@@ -164,118 +165,394 @@ def seed_data(conn: sqlite3.Connection):
 
 
 # ---------------------------------------------------------------------------
-# CSV import (for the data-science component's output)
+# Robust CSV import
 # ---------------------------------------------------------------------------
 
+def _normalise_header(value):
+    """
+    Convert headers such as:
+
+        Substation ID
+        substation-id
+        SUBSTATION_ID
+        ﻿Substation_ID
+
+    into:
+
+        substation_id
+    """
+    text = str(value or "")
+    text = text.replace("\ufeff", "").strip().lower()
+    text = re.sub(r"[^a-z0-9]+", "_", text)
+    return re.sub(r"_+", "_", text).strip("_")
+
+
 def _read_csv_rows(filepath):
-    """Read a CSV and return a list of dicts with normalised headers.
-    encoding='utf-8-sig' strips the hidden BOM Excel adds."""
-    with open(filepath, newline="", encoding="utf-8-sig") as f:
-        reader = csv.DictReader(f)
+    """
+    Read a CSV file and return rows with normalised column names.
+
+    Supports:
+    - UTF-8 files
+    - Excel UTF-8 BOM files
+    - comma-separated files
+    - semicolon-separated files
+    - tab-separated files
+    - pipe-separated files
+    """
+    with open(filepath, "r", newline="", encoding="utf-8-sig") as file:
+        sample = file.read(8192)
+        file.seek(0)
+
+        try:
+            dialect = csv.Sniffer().sniff(
+                sample,
+                delimiters=",;\t|"
+            )
+        except csv.Error:
+            dialect = csv.excel
+
+        reader = csv.DictReader(file, dialect=dialect)
+
         if not reader.fieldnames:
-            raise ValueError("Could not read any columns from this file.")
-        reader.fieldnames = [
-            (h or "").strip().lower().replace(" ", "_").replace("-", "_")
-            for h in reader.fieldnames
-        ]
-        return list(reader)
+            raise ValueError("The CSV file does not contain a header row.")
+
+        rows = []
+
+        for raw_row in reader:
+            row = {}
+
+            for raw_key, raw_value in raw_row.items():
+                if raw_key is None:
+                    continue
+
+                key = _normalise_header(raw_key)
+
+                if isinstance(raw_value, list):
+                    raw_value = ",".join(raw_value)
+
+                row[key] = str(raw_value or "").strip()
+
+            if any(row.values()):
+                rows.append(row)
+
+        return rows
 
 
-def _pick(cols, *candidates):
-    """Return the first candidate present in cols, else None."""
-    for c in candidates:
-        if c in cols:
-            return c
+def _pick(columns, *candidates):
+    """Return the first matching column name."""
+    normalised_candidates = [
+        _normalise_header(candidate)
+        for candidate in candidates
+    ]
+
+    for candidate in normalised_candidates:
+        if candidate in columns:
+            return candidate
+
     return None
 
 
-def import_substations_csv(conn, filepath):
-    rows = _read_csv_rows(filepath)
-    if not rows:
-        raise ValueError("The file has no data rows.")
+def _to_integer(value):
+    """Convert values such as 12, 12.0, or '12' to an integer."""
+    value = str(value or "").strip()
 
-    cols = set(rows[0].keys())
-    id_col     = _pick(cols, "substation_id", "id", "sub_id", "station_id", "substationid")
-    name_col   = _pick(cols, "name", "substation", "substation_name", "station", "station_name")
-    region_col = _pick(cols, "region", "area", "zone", "location", "district")
+    if not value:
+        return None
+
+    try:
+        return int(float(value.replace(",", "")))
+    except (ValueError, TypeError, OverflowError):
+        return None
+
+
+def import_substations_csv(conn, filepath):
+    """
+    Import a substations CSV.
+
+    Accepted examples:
+
+        substation_id,name,region
+        Substation ID,Substation Name,Region
+        id,station,area
+
+    The ID column is optional. If it is missing, IDs are generated.
+    """
+    rows = _read_csv_rows(filepath)
+
+    if not rows:
+        raise ValueError("The CSV file contains no data rows.")
+
+    columns = set(rows[0].keys())
+
+    id_col = _pick(
+        columns,
+        "substation_id",
+        "substationid",
+        "sub_id",
+        "station_id",
+        "substation_code",
+        "station_code",
+        "id",
+        "code"
+    )
+
+    name_col = _pick(
+        columns,
+        "name",
+        "substation",
+        "substation_name",
+        "station",
+        "station_name"
+    )
+
+    region_col = _pick(
+        columns,
+        "region",
+        "region_name",
+        "area",
+        "zone",
+        "location",
+        "district"
+    )
 
     if not name_col or not region_col:
         raise ValueError(
-            "Could not match the columns in this file.\n\n"
-            f"Columns found: {', '.join(sorted(cols)) or '(none)'}\n\n"
-            "Needed: a name column (name/substation) and a region column (region/zone/area)."
+            "The substations CSV must contain a name and region column.\n\n"
+            f"Columns detected:\n{', '.join(sorted(columns))}\n\n"
+            "Accepted name columns: name, substation, substation_name\n"
+            "Accepted region columns: region, area, zone, location"
         )
 
-    count = 0
-    for row in rows:
-        name   = (row.get(name_col) or "").strip()
-        region = (row.get(region_col) or "").strip()
-        if not name:
-            continue
-        sid = None
-        if id_col and (row.get(id_col) or "").strip():
-            try:
-                sid = int(float(row[id_col].strip()))
-            except ValueError:
-                sid = None
-        if sid is None:  # no usable ID in file → auto-assign
-            sid = conn.execute(
-                "SELECT COALESCE(MAX(substation_id),0)+1 FROM substations"
-            ).fetchone()[0]
-        conn.execute(
-            "INSERT OR IGNORE INTO substations (substation_id, name, region) VALUES (?,?,?)",
-            (sid, name, region),
-        )
-        count += 1
-    conn.commit()
-    return count
+    next_id = conn.execute(
+        "SELECT COALESCE(MAX(substation_id), 0) + 1 FROM substations"
+    ).fetchone()[0]
+
+    imported = 0
+
+    try:
+        for row in rows:
+            name = (row.get(name_col) or "").strip()
+            region = (row.get(region_col) or "").strip()
+
+            if not name:
+                continue
+
+            if not region:
+                region = "Unknown"
+
+            substation_id = None
+
+            if id_col:
+                substation_id = _to_integer(row.get(id_col))
+
+            if substation_id is None or substation_id <= 0:
+                while conn.execute(
+                    "SELECT 1 FROM substations WHERE substation_id=?",
+                    (next_id,)
+                ).fetchone():
+                    next_id += 1
+
+                substation_id = next_id
+                next_id += 1
+
+            cursor = conn.execute(
+                """
+                INSERT OR IGNORE INTO substations
+                    (substation_id, name, region)
+                VALUES (?, ?, ?)
+                """,
+                (substation_id, name, region)
+            )
+
+            if cursor.rowcount == 1:
+                imported += 1
+
+        conn.commit()
+
+    except Exception:
+        conn.rollback()
+        raise
+
+    return imported
+
+
+def _find_substation_id(conn, value):
+    """
+    Resolve a substation reference that may be either:
+    - a numeric substation ID
+    - a substation name
+    """
+    value = str(value or "").strip()
+
+    if not value:
+        return None
+
+    numeric_id = _to_integer(value)
+
+    if numeric_id is not None:
+        exists = conn.execute(
+            "SELECT substation_id FROM substations WHERE substation_id=?",
+            (numeric_id,)
+        ).fetchone()
+
+        return exists[0] if exists else None
+
+    result = conn.execute(
+        """
+        SELECT substation_id
+        FROM substations
+        WHERE name = ? COLLATE NOCASE
+        """,
+        (value,)
+    ).fetchone()
+
+    return result[0] if result else None
 
 
 def import_lines_csv(conn, filepath):
+    """
+    Import lines.csv.
+
+    Supports examples such as:
+
+        line_id,name,voltage,region,substation_id
+        Line ID,Line Name,Voltage,Region,Substation ID
+        id,feeder,kv,area,station
+    """
     rows = _read_csv_rows(filepath)
+
     if not rows:
-        raise ValueError("The file has no data rows.")
+        raise ValueError("The CSV file contains no data rows.")
 
-    cols = set(rows[0].keys())
-    name_col   = _pick(cols, "name", "line", "line_name", "feeder", "feeder_name")
-    volt_col   = _pick(cols, "voltage", "voltage_kv", "kv", "voltage_level")
-    region_col = _pick(cols, "region", "area", "zone", "location", "district")
-    sub_col    = _pick(cols, "substation_id", "sub_id", "station_id",
-                       "substation", "substation_name", "from_substation")
+    columns = set(rows[0].keys())
 
-    if not name_col:
+    line_id_col = _pick(
+        columns,
+        "line_id",
+        "lineid",
+        "line_code",
+        "line_number",
+        "id"
+    )
+
+    name_col = _pick(
+        columns,
+        "name",
+        "line",
+        "line_name",
+        "feeder",
+        "feeder_name"
+    )
+
+    voltage_col = _pick(
+        columns,
+        "voltage",
+        "voltage_kv",
+        "kv",
+        "voltage_level"
+    )
+
+    region_col = _pick(
+        columns,
+        "region",
+        "region_name",
+        "area",
+        "zone",
+        "location",
+        "district"
+    )
+
+    substation_col = _pick(
+        columns,
+        "substation_id",
+        "substationid",
+        "sub_id",
+        "station_id",
+        "substation",
+        "substation_name",
+        "from_substation",
+        "from_substation_id"
+    )
+
+    if not name_col and not line_id_col:
         raise ValueError(
-            "Could not find a line-name column.\n\n"
-            f"Columns found: {', '.join(sorted(cols)) or '(none)'}"
+            "The lines CSV must contain either a line name or line ID column.\n\n"
+            f"Columns detected:\n{', '.join(sorted(columns))}"
         )
 
-    count = 0
-    for row in rows:
-        name = (row.get(name_col) or "").strip()
-        if not name:
-            continue
-        sub_id = None
-        if sub_col:
-            raw = (row.get(sub_col) or "").strip()
-            if raw:
-                try:
-                    sub_id = int(float(raw))          # numeric substation id
-                except ValueError:                    # maybe it's a substation NAME
-                    r = conn.execute(
-                        "SELECT substation_id FROM substations WHERE name = ? COLLATE NOCASE",
-                        (raw,),
-                    ).fetchone()
-                    sub_id = r[0] if r else None
-        conn.execute(
-            "INSERT INTO lines (name, voltage, region, substation_id) VALUES (?,?,?,?)",
-            (name,
-             (row.get(volt_col) or "") if volt_col else "",
-             (row.get(region_col) or "") if region_col else "",
-             sub_id),
-        )
-        count += 1
-    conn.commit()
-    return count
+    imported = 0
+
+    try:
+        for row in rows:
+            raw_line_id = row.get(line_id_col, "") if line_id_col else ""
+            line_id = _to_integer(raw_line_id)
+
+            if name_col:
+                line_name = (row.get(name_col) or "").strip()
+            else:
+                line_name = ""
+
+            if not line_name:
+                line_name = f"Line {raw_line_id}".strip()
+
+            if not line_name or line_name == "Line":
+                continue
+
+            voltage = (
+                (row.get(voltage_col) or "").strip()
+                if voltage_col else ""
+            )
+
+            region = (
+                (row.get(region_col) or "").strip()
+                if region_col else ""
+            )
+
+            substation_id = _find_substation_id(
+                conn,
+                row.get(substation_col) if substation_col else ""
+            )
+
+            if line_id is not None:
+                cursor = conn.execute(
+                    """
+                    INSERT OR IGNORE INTO lines
+                        (line_id, name, voltage, region, substation_id)
+                    VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (
+                        line_id,
+                        line_name,
+                        voltage,
+                        region,
+                        substation_id
+                    )
+                )
+            else:
+                cursor = conn.execute(
+                    """
+                    INSERT INTO lines
+                        (name, voltage, region, substation_id)
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    (
+                        line_name,
+                        voltage,
+                        region,
+                        substation_id
+                    )
+                )
+
+            if cursor.rowcount == 1:
+                imported += 1
+
+        conn.commit()
+
+    except Exception:
+        conn.rollback()
+        raise
+
+    return imported
 
 
 # ---------------------------------------------------------------------------
